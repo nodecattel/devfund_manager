@@ -1,0 +1,255 @@
+# DevFund Manager - .gitignore
+# Protects sensitive data and prevents accidental commits
+
+# ====================================
+# CRITICAL SECURITY FILES
+# ====================================
+# These files contain private keys and sensitive configuration
+.env
+.env.local
+.env.production
+.env.staging
+*.env
+redeem_script.hex
+private_keys.txt
+wallet.dat
+*.wif
+*.key
+
+# ====================================
+# RUNTIME STATE & LOGS
+# ====================================
+# Monitor state and operational data
+.monitor_state.json
+.multisig_tx/
+.emergency_stop
+
+# Log files
+*.log
+*.log.*
+logs/
+monitor.log
+devfund_manager.log
+multisig_op.log
+
+# Backup files
+backups/
+*.backup
+*.bak
+
+# ====================================
+# PYTHON GENERATED FILES
+# ====================================
+# Python bytecode
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+share/python-wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual environments
+venv/
+env/
+ENV/
+.venv/
+.env/
+.ENV/
+
+# ====================================
+# DEVELOPMENT & TESTING
+# ====================================
+# Testing
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+
+# Jupyter Notebook
+.ipynb_checkpoints
+
+# pyenv
+.python-version
+
+# pipenv
+Pipfile.lock
+
+# poetry
+poetry.lock
+
+# ====================================
+# IDE & EDITOR FILES
+# ====================================
+# VSCode
+.vscode/
+*.code-workspace
+
+# PyCharm
+.idea/
+*.iml
+*.iws
+
+# Sublime Text
+*.sublime-project
+*.sublime-workspace
+
+# Vim
+*.swp
+*.swo
+*~
+
+# Emacs
+*~
+\#*\#
+/.emacs.desktop
+/.emacs.desktop.lock
+*.elc
+auto-save-list
+tramp
+.\#*
+
+# ====================================
+# SYSTEM FILES
+# ====================================
+# macOS
+.DS_Store
+.AppleDouble
+.LSOverride
+Icon
+._*
+.DocumentRevisions-V100
+.fseventsd
+.Spotlight-V100
+.TemporaryItems
+.Trashes
+.VolumeIcon.icns
+.com.apple.timemachine.donotpresent
+
+# Windows
+Thumbs.db
+Thumbs.db:encryptable
+ehthumbs.db
+ehthumbs_vista.db
+*.tmp
+*.temp
+Desktop.ini
+$RECYCLE.BIN/
+*.cab
+*.msi
+*.msix
+*.msm
+*.msp
+*.lnk
+
+# Linux
+*~
+.fuse_hidden*
+.directory
+.Trash-*
+.nfs*
+
+# ====================================
+# JUNKCOIN SPECIFIC
+# ====================================
+# Wallet files
+wallet/
+wallets/
+*.wallet
+junkcoind.pid
+debug.log
+fee_estimates.dat
+peers.dat
+banlist.dat
+.cookie
+.lock
+
+# Configuration that might contain sensitive data
+junkcoin.conf
+*.conf
+
+# ====================================
+# TEMPORARY & CACHE FILES
+# ====================================
+# Temporary files
+temp/
+tmp/
+*.tmp
+*.temp
+*.cache
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
+*.7z
+
+# ====================================
+# DEPLOYMENT & PRODUCTION
+# ====================================
+# Docker
+.dockerignore
+docker-compose.override.yml
+
+# Deployment scripts with secrets
+deploy.sh
+deploy_prod.sh
+secrets/
+credentials/
+
+# SSL certificates
+*.pem
+*.key
+*.crt
+*.csr
+*.p12
+*.pfx
+
+# ====================================
+# MONITORING & ANALYTICS
+# ====================================
+# Performance monitoring
+*.prof
+*.trace
+
+# Analytics data
+analytics/
+metrics/
+
+# ====================================
+# DOCUMENTATION BUILD
+# ====================================
+# Sphinx documentation
+docs/_build/
+docs/_static/
+docs/_templates/
+
+# ====================================
+# CUSTOM PROJECT FILES
+# ====================================
+# Add any project-specific files here
+# example_transactions.json
+# test_wallets/
+# production_config/
