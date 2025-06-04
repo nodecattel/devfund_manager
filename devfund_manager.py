@@ -38,7 +38,7 @@ class Config:
     dev_percent: int = 25
     marketing_percent: int = 25
     primary_api: str = "https://junk-api.s3na.xyz"
-    fallback_api: str = "https://api.junkiewally.xyz"
+    fallback_api: str = "https://junk-api.s3na.xyz"
     log_level: str = "INFO"
     api_timeout: int = 30
     max_retries: int = 3
@@ -330,8 +330,18 @@ class DevFundManager:
                 for line in output_lines:
                     if 'Success:' in line:
                         txid = line.split('Success:')[-1].strip()
-                        self.logger.info(f"Transaction ID: {txid}")
+                        self.logger.info(f"💎 Transaction ID: {txid}")
                         return txid
+                
+                # Look for transaction ID in any line
+                import re
+                for line in output_lines:
+                    txid_match = re.search(r'\b([a-fA-F0-9]{64})\b', line)
+                    if txid_match:
+                        txid = txid_match.group(1)
+                        self.logger.info(f"💎 Transaction ID: {txid}")
+                        return txid
+                
                 return "SUCCESS"
             else:
                 self.logger.error("❌ Sendmany distribution failed")
