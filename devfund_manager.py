@@ -43,7 +43,7 @@ class Config:
     api_timeout: int = 30
     max_retries: int = 3
     min_distribution_amount: int = 10000000
-    fee_rate: int = 10
+    fee_rate: int = 100
     network: str = "mainnet"
     multisig_m: int = 2
     multisig_n: int = 3
@@ -169,13 +169,17 @@ class DevFundManager:
             'PRIMARY_API': 'primary_api',
             'FALLBACK_API': 'fallback_api',
             'REDEEM_SCRIPT': 'redeem_script',
-            'USE_SENDMANY': 'use_sendmany'
+            'USE_SENDMANY': 'use_sendmany',
+            'FEE_RATE': 'fee_rate',
+            'MIN_DISTRIBUTION_AMOUNT': 'min_distribution_amount',
+            'API_TIMEOUT': 'api_timeout',
+            'MAX_RETRIES': 'max_retries'
         }
         
         for env_var, config_attr in env_mappings.items():
             value = os.getenv(env_var)
             if value:
-                if config_attr.endswith(('_utxo', '_sats', '_percent')):
+                if config_attr.endswith(('_utxo', '_sats', '_percent', '_rate', '_amount', '_timeout', '_retries')):
                     try:
                         value = int(value)
                     except ValueError:
@@ -236,11 +240,35 @@ class DevFundManager:
     def sats_to_jkc(sats: int):
         return Decimal(sats) / Decimal('100000000')
     
+    def estimate_transaction_size(self, num_inputs=1, num_outputs=3):
+        """
+        Estimate transaction size in virtual bytes (vB) for fee calculation
+        
+        Typical multisig transaction structure:
+        - Base transaction: ~10 vB
+        - Each P2SH input: ~295 vB (2-of-3 multisig signature)
+        - Each P2PKH output: ~34 vB
+        - Each P2SH output: ~32 vB
+        """
+        base_size = 10
+        input_size = num_inputs * 295  # P2SH multisig inputs are large
+        output_size = num_outputs * 34  # Assume P2PKH outputs
+        
+        estimated_size = base_size + input_size + output_size
+        
+        # Add 10% buffer for safety
+        return int(estimated_size * 1.1)
+    
     def calculate_distribution(self, total_balance: int):
         """Calculate distribution amounts while respecting minimum balance"""
         
-        # Reserve minimum balance + fee buffer
-        fee_reserve = self.config.fee_rate * 250  # Estimate for transaction fees
+        # FIXED: Proper fee calculation based on actual transaction size
+        estimated_tx_size = self.estimate_transaction_size(num_inputs=1, num_outputs=3)
+        fee_sats = self.config.fee_rate * estimated_tx_size
+        
+        # Add 50% buffer for network congestion
+        fee_reserve = int(fee_sats * 1.5)
+        
         total_reserve = self.config.minimum_balance_sats + fee_reserve
         
         if total_balance <= total_reserve:
@@ -252,7 +280,10 @@ class DevFundManager:
         self.logger.info(f"Balance calculation:")
         self.logger.info(f"  Total balance: {self.sats_to_jkc(total_balance)} JKC")
         self.logger.info(f"  Minimum reserve: {self.sats_to_jkc(self.config.minimum_balance_sats)} JKC")
-        self.logger.info(f"  Fee reserve: {self.sats_to_jkc(fee_reserve)} JKC")
+        self.logger.info(f"  Estimated TX size: {estimated_tx_size} vB")
+        self.logger.info(f"  Fee rate: {self.config.fee_rate} sats/vB")
+        self.logger.info(f"  Calculated fee: {self.sats_to_jkc(fee_sats)} JKC ({fee_sats} sats)")
+        self.logger.info(f"  Fee reserve (with 50% buffer): {self.sats_to_jkc(fee_reserve)} JKC")
         self.logger.info(f"  Distributable: {self.sats_to_jkc(distributable)} JKC")
         
         liquidity_amount = int(distributable_decimal * Decimal(self.config.liquidity_percent) / Decimal('100'))
@@ -296,6 +327,19 @@ class DevFundManager:
         
         recipients_json = json.dumps(recipients)
         
+        # Calculate proper fee for the transaction
+        estimated_tx_size = self.estimate_transaction_size(num_inputs=1, num_outputs=len(recipients))
+        calculated_fee_sats = self.config.fee_rate * estimated_tx_size
+        
+        # Add buffer for network congestion
+        final_fee_rate = int(self.config.fee_rate * 1.5)  # 50% higher for reliability
+        
+        self.logger.info(f"Transaction fee calculation:")
+        self.logger.info(f"  Estimated size: {estimated_tx_size} vB")
+        self.logger.info(f"  Base fee rate: {self.config.fee_rate} sats/vB")
+        self.logger.info(f"  Final fee rate (with buffer): {final_fee_rate} sats/vB")
+        self.logger.info(f"  Expected total fee: {self.sats_to_jkc(final_fee_rate * estimated_tx_size)} JKC")
+        
         cmd = [
             "python3",
             str(self.config.multisig_script.absolute()),
@@ -305,7 +349,7 @@ class DevFundManager:
             recipients_json,
             self.config.signer1_wif,
             self.config.signer2_wif,
-            "--fee-rate", str(self.config.fee_rate)
+            "--fee-rate", str(final_fee_rate)  # Use buffered fee rate
         ]
         
         try:
@@ -314,6 +358,8 @@ class DevFundManager:
             
             # Set environment and run from script directory
             env = os.environ.copy()
+            env['FEE_RATE'] = str(final_fee_rate)  # Pass fee rate via environment too
+            
             result = subprocess.run(
                 cmd, 
                 capture_output=True, 
@@ -346,6 +392,15 @@ class DevFundManager:
             else:
                 self.logger.error("❌ Sendmany distribution failed")
                 self.logger.error(f"Return code: {result.returncode}")
+                
+                # Enhanced error analysis
+                error_output = result.stderr + result.stdout
+                if 'insufficient priority' in error_output.lower():
+                    self.logger.error(f"💡 Fee too low! Current rate: {final_fee_rate} sats/vB")
+                    self.logger.error(f"💡 Try increasing FEE_RATE in .env to 1000-3000 sats/vB")
+                elif 'insufficient funds' in error_output.lower():
+                    self.logger.error(f"💡 Not enough funds for transaction + fees")
+                
                 if result.stderr:
                     self.logger.error(f"STDERR: {result.stderr}")
                 if result.stdout:
@@ -543,12 +598,24 @@ class DevFundManager:
         self.logger.info(f"  UTXOs: {self.config.threshold_utxo}")
         self.logger.info(f"  Balance: {self.sats_to_jkc(self.config.threshold_balance_sats)} JKC")
         self.logger.info(f"  Minimum balance (preserved): {self.sats_to_jkc(self.config.minimum_balance_sats)} JKC")
+        self.logger.info(f"  Minimum distribution: {self.sats_to_jkc(self.config.min_distribution_amount)} JKC")
         self.logger.info("")
         self.logger.info("Distribution:")
         self.logger.info(f"  Liquidity: {self.config.liquidity_percent}%")
         self.logger.info(f"  Dev: {self.config.dev_percent}%")
         self.logger.info(f"  Marketing: {self.config.marketing_percent}%")
         self.logger.info(f"  Method: {'Sendmany (single tx)' if self.config.use_sendmany else 'Individual transactions'}")
+        self.logger.info("")
+        self.logger.info("Transaction Settings:")
+        self.logger.info(f"  Fee Rate: {self.config.fee_rate} sats/vB")
+        self.logger.info(f"  Network: {self.config.network}")
+        self.logger.info(f"  Multisig: {self.config.multisig_m}-of-{self.config.multisig_n}")
+        self.logger.info("")
+        self.logger.info("API Settings:")
+        self.logger.info(f"  Primary API: {self.config.primary_api}")
+        self.logger.info(f"  Fallback API: {self.config.fallback_api}")
+        self.logger.info(f"  Timeout: {self.config.api_timeout}s")
+        self.logger.info(f"  Max Retries: {self.config.max_retries}")
         self.logger.info("")
         self.logger.info("Execution:")
         self.logger.info(f"  Multisig Script: {self.config.multisig_script}")

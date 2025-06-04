@@ -26,7 +26,7 @@ getcontext().prec = 28
 class MultisigConfig:
     junkcoin_cli: str = "junkcoin-cli"
     network: str = "mainnet"
-    default_fee_rate: int = 10
+    default_fee_rate: int = 100
     min_relay_fee: int = 1000
     dust_threshold: int = 546
     confirmation_target: int = 6
@@ -116,7 +116,7 @@ class MultisigOperations:
         env_mappings = {
             'JUNKCOIN_CLI': 'junkcoin_cli',
             'NETWORK': 'network',
-            'DEFAULT_FEE_RATE': 'default_fee_rate',
+            'FEE_RATE': 'default_fee_rate',
             'MIN_RELAY_FEE': 'min_relay_fee',
             'DUST_THRESHOLD': 'dust_threshold',
             'PRIMARY_BROADCAST_API': 'broadcast_api'
@@ -289,10 +289,41 @@ class MultisigOperations:
         except Exception as e:
             raise MultisigError(f"Failed to get UTXOs: {e}")
     
-    def select_utxos(self, utxos: List[Dict], target_amount: Decimal, fee_reserve: int = 5000) -> Tuple[List[Dict], int]:
-        """Select UTXOs for transaction with fee buffer"""
+    def estimate_fee(self, input_count: int, output_count: int, fee_rate: int = None) -> int:
+        """Estimate transaction fee in satoshis with proper multisig sizing"""
+        if fee_rate is None:
+            fee_rate = self.config.default_fee_rate
+        
+        # Proper multisig transaction size estimation:
+        # - Base transaction: ~10 bytes
+        # - Each P2SH multisig input: ~295 bytes (much larger than regular inputs)
+        # - Each output: ~34 bytes
+        base_size = 10
+        input_size = input_count * 295  # P2SH multisig inputs are large
+        output_size = output_count * 34
+        
+        estimated_size = base_size + input_size + output_size
+        estimated_fee = estimated_size * fee_rate
+        
+        # Always respect minimum relay fee
+        final_fee = max(estimated_fee, self.config.min_relay_fee)
+        
+        self.logger.debug(f"Fee calculation:")
+        self.logger.debug(f"  Estimated size: {estimated_size} vB")
+        self.logger.debug(f"  Fee rate: {fee_rate} sats/vB")
+        self.logger.debug(f"  Calculated fee: {estimated_fee} sats")
+        self.logger.debug(f"  Final fee (with min): {final_fee} sats")
+        
+        return final_fee
+    
+    def select_utxos(self, utxos: List[Dict], target_amount: Decimal, fee_rate: int = None) -> Tuple[List[Dict], int]:
+        """Select UTXOs for transaction with proper fee calculation"""
         target_sats = int(target_amount * Decimal('100000000'))
-        target_with_fee = target_sats + fee_reserve
+        
+        # Estimate fee based on expected transaction size
+        # Start with 1 output, will adjust if change is needed
+        estimated_fee = self.estimate_fee(1, 1, fee_rate)  # Rough estimate to start
+        target_with_fee = target_sats + estimated_fee
         
         # Sort UTXOs by amount (largest first for efficiency)
         sorted_utxos = sorted(utxos, key=lambda x: Decimal(str(x['amount'])), reverse=True)
@@ -305,21 +336,17 @@ class MultisigOperations:
             utxo_sats = int(Decimal(str(utxo['amount'])) * Decimal('100000000'))
             total_input_sats += utxo_sats
             
-            if total_input_sats >= target_with_fee:
+            # Recalculate fee with actual input count
+            actual_fee = self.estimate_fee(len(selected), 2, fee_rate)  # 2 outputs (target + change)
+            needed_total = target_sats + actual_fee
+            
+            if total_input_sats >= needed_total:
                 break
         
         if total_input_sats < target_sats:
             raise MultisigError(f"Insufficient funds: need {target_sats} sats, have {total_input_sats} sats")
         
         return selected, total_input_sats
-    
-    def estimate_fee(self, input_count: int, output_count: int) -> int:
-        """Estimate transaction fee in satoshis"""
-        # Rough estimation: inputs=148 bytes, outputs=34 bytes, overhead=10 bytes
-        estimated_size = input_count * 148 + output_count * 34 + 10
-        estimated_fee = estimated_size * self.config.default_fee_rate
-        
-        return max(estimated_fee, self.config.min_relay_fee)
     
     def sign_raw_transaction(self, raw_tx: str, private_keys: List[str], prevtxs: List[Dict] = None) -> Tuple[str, bool]:
         """Sign a raw transaction using available signing methods"""
@@ -342,7 +369,7 @@ class MultisigOperations:
                 return signed_tx, complete
                 
         except MultisigError as e:
-            self.logger.debug(f"Modern signing failed: {e}")
+            self.logger.warning(f"Sign transaction with keys failed (attempt 1): {e}")
         
         # Fallback to legacy signrawtransaction
         try:
@@ -361,12 +388,13 @@ class MultisigOperations:
             return signed_tx, complete
             
         except MultisigError as e:
+            self.logger.warning(f"Sign transaction with keys failed (attempt 2): {e}")
             raise MultisigError(f"Both signing methods failed: {e}")
     
     def create_and_sign_transaction(self, from_addr: str, recipients: Dict[str, str], 
                                    redeem_script: str, private_keys: List[str], 
                                    fee_rate: int = None) -> Tuple[str, bool]:
-        """Create and sign a transaction"""
+        """Create and sign a transaction with proper fee rate handling"""
         
         # Validate inputs
         self.validate_address(from_addr, "multisig")
@@ -380,8 +408,20 @@ class MultisigOperations:
         if not redeem_script:
             raise MultisigError("Redeem script is required")
         
+        # Use provided fee rate or default
         if fee_rate is None:
             fee_rate = self.config.default_fee_rate
+            
+        # Load fee rate from environment if available
+        env_fee_rate = os.getenv('FEE_RATE')
+        if env_fee_rate:
+            try:
+                fee_rate = int(env_fee_rate)
+                self.logger.info(f"Using FEE_RATE from environment: {fee_rate} sats/vB")
+            except ValueError:
+                self.logger.warning(f"Invalid FEE_RATE in environment: {env_fee_rate}")
+        
+        self.logger.info(f"Using fee rate: {fee_rate} sats/vB")
         
         # Get UTXOs
         utxos = self.get_utxos(from_addr)
@@ -391,23 +431,29 @@ class MultisigOperations:
         # Calculate total send amount
         total_send = sum(Decimal(amount) for amount in recipients.values())
         
-        # Select UTXOs
-        selected_utxos, total_input_sats = self.select_utxos(utxos, total_send)
+        # Select UTXOs with proper fee calculation
+        selected_utxos, total_input_sats = self.select_utxos(utxos, total_send, fee_rate)
         
-        # Estimate fee
+        # Calculate final fee with exact input/output counts
         output_count = len(recipients) + 1  # recipients + change
-        estimated_fee = self.estimate_fee(len(selected_utxos), output_count)
-        estimated_fee = max(estimated_fee, self.config.min_relay_fee)
+        final_fee = self.estimate_fee(len(selected_utxos), output_count, fee_rate)
         
         # Calculate change
         total_send_sats = int(total_send * Decimal('100000000'))
-        change_sats = total_input_sats - total_send_sats - estimated_fee
+        change_sats = total_input_sats - total_send_sats - final_fee
         
         self.logger.info(f"Transaction details:")
         self.logger.info(f"  Inputs: {len(selected_utxos)} UTXOs, total: {total_input_sats / 100000000} JKC")
         self.logger.info(f"  Send total: {total_send} JKC")
-        self.logger.info(f"  Estimated fee: {estimated_fee / 100000000} JKC")
+        self.logger.info(f"  Fee rate: {fee_rate} sats/vB")
+        self.logger.info(f"  Estimated size: {10 + len(selected_utxos) * 295 + output_count * 34} vB")
+        self.logger.info(f"  Calculated fee: {final_fee / 100000000} JKC ({final_fee} sats)")
         self.logger.info(f"  Change: {change_sats / 100000000} JKC")
+        
+        # Check if we have enough funds including fee
+        if total_input_sats < total_send_sats + final_fee:
+            needed = total_send_sats + final_fee
+            raise MultisigError(f"Insufficient funds: need {needed} sats, have {total_input_sats} sats")
         
         # Create inputs
         inputs = [{"txid": utxo["txid"], "vout": utxo["vout"]} for utxo in selected_utxos]
@@ -421,8 +467,8 @@ class MultisigOperations:
         if change_sats > self.config.dust_threshold:
             change_amount = Decimal(change_sats) / Decimal('100000000')
             outputs[from_addr] = change_amount
-        else:
-            self.logger.info("Change amount below dust threshold, adding to fee")
+        elif change_sats > 0:
+            self.logger.info(f"Change amount ({change_sats} sats) below dust threshold, adding to fee")
         
         # Create raw transaction
         try:
@@ -460,28 +506,8 @@ class MultisigOperations:
         except Exception as e:
             raise MultisigError(f"Failed to create/sign transaction: {e}")
     
-    def broadcast_transaction_cli(self, signed_tx: str) -> str:
-        """Broadcast transaction using junkcoin-cli"""
-        self.logger.info("Broadcasting transaction via CLI...")
-        
-        try:
-            result = self.cli_command([
-                "sendrawtransaction",
-                signed_tx
-            ], "Broadcast transaction")
-            
-            txid = result.get("result", result.get("txid", ""))
-            if not txid:
-                raise MultisigError("CLI broadcast failed: empty transaction ID")
-            
-            self.logger.info(f"✅ Transaction broadcast successfully via CLI: {txid}")
-            return txid
-            
-        except Exception as e:
-            raise MultisigError(f"Failed to broadcast via CLI: {e}")
-    
     def broadcast_transaction_api(self, signed_tx: str) -> str:
-        """Broadcast transaction using API"""
+        """Broadcast transaction using API with better error handling"""
         self.logger.info("Broadcasting transaction via API...")
         
         try:
@@ -493,10 +519,43 @@ class MultisigOperations:
                 self.logger.info(f"✅ Transaction broadcast successfully via API: {txid}")
                 return txid
             else:
-                raise MultisigError(f"API broadcast failed: {response.status_code} - {response.text}")
+                error_text = response.text
+                # Better error parsing for API responses
+                if 'insufficient priority' in error_text.lower():
+                    raise MultisigError(f"API broadcast failed: 400 - sendrawtransaction RPC error: {{\"code\":-26,\"message\":\"66: insufficient priority\"}}")
+                else:
+                    raise MultisigError(f"API broadcast failed: {response.status_code} - {error_text}")
                 
         except requests.exceptions.RequestException as e:
-            raise MultisigError(f"Failed to broadcast via API: {e}")
+            raise MultisigError(f"API broadcast failed: {e}")
+    
+    def broadcast_transaction_cli(self, signed_tx: str) -> str:
+        """Broadcast transaction using junkcoin-cli with better error handling"""
+        self.logger.info("Broadcasting transaction via CLI...")
+        
+        for attempt in range(self.config.max_retries):
+            try:
+                result = self.cli_command([
+                    "sendrawtransaction",
+                    signed_tx
+                ], f"Broadcast transaction (attempt {attempt + 1})")
+                
+                txid = result.get("result", result.get("txid", ""))
+                if not txid:
+                    raise MultisigError("CLI broadcast failed: empty transaction ID")
+                
+                self.logger.info(f"✅ Transaction broadcast successfully via CLI: {txid}")
+                return txid
+                
+            except MultisigError as e:
+                if attempt < self.config.max_retries - 1:
+                    self.logger.warning(f"Broadcast transaction failed (attempt {attempt + 1}): {e}")
+                    time.sleep(self.config.retry_delay)
+                    continue
+                else:
+                    raise MultisigError(f"Broadcast transaction failed: {e}")
+        
+        raise MultisigError("Maximum retry attempts reached")
     
     def broadcast_transaction(self, signed_tx: str, use_api: bool = True) -> str:
         """Broadcast a signed transaction (try API first, then CLI)"""
@@ -622,7 +681,6 @@ def main():
                 amount=args.amount,
                 redeem_script=args.redeem_script,
                 private_keys=[args.key1, args.key2],
-                fee_rate=args.fee_rate,
                 broadcast=not args.no_broadcast,
                 use_api=not args.use_cli
             )
